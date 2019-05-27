@@ -15,15 +15,41 @@
 // let xhrUrl = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
 
 
+
+
 const superagent = require("superagent"); //客户端请求代理模块
 const async = require("async");
+const common = require('./utils/common.js');
+
+const mongoose = require('mongoose');
+global.mongoose = require('mongoose');
+
+const mongoHandler = require('./mongodb/mongoHandler.js');
+
+mongoose.connect("mongodb://127.0.0.1:‌​27017/eleme-spider", {useNewUrlParser:true});
+
+global.db = mongoose.connection;
+db.on('open', function(cb){
+	console.log('数据库成功连接');
+});
+
+const	startDate = new Date();	//开始时间
+let	endDate = false;	//结束时间
+
+let	COUNT = 5; //人为控制爬取次数
+
+//代理请求的中心位置
+let location = {
+	latitude: 30.681090,
+	longitude: 104.101420
+}
 
 let	offset = 0;
 let	rank_id = '';
 let	has_next = true;
-let	limit = 5;
 let	index = 0;
-let	url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
+// let	url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
+let	url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
 
 let start = function(offset, rank_id) {
 	let getStoreAllInfo = function(callback) {
@@ -33,8 +59,13 @@ let start = function(offset, rank_id) {
 	    .set('referer', 'https://h5.ele.me/')
 	    .set('user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1')
 	    .set('x-uab', '118#ZVWZz2sMZu/oXZCfBHRIZYquZYT4zHWzagC2Voq4mMXHoUZTyHRVPgZuusqhzeWZZZZZXoqVzeAuZZZh0HWWGcb/ZzqTqhZzZgeCc5qVzHZzZeZTVHRVZZZuZwqhzeWzZZZuXTbVzHZzZeZhTgKfgH2Z5Nh6DwmYtHFUpoq4cAIJ+llc/guWQsu2Us41manDSp8JzBnss3ybyCbBub1Lz2wqTA5ZvtM7AY5iQ1uTugZCmrDtKHZzhCAYu+t5RgZTlJTRSmiVZFVxzWaEYrxGqLmRx41C2dYob1PLoF1IV0B47DhVSv8bVcY65NhWeAWBgeo4Gf2fFCcgZrIpJ9EG/tjt7G5jpZwC5GQwIYFOfH0NrLhg+DML4+mFz8vpwAAzIDt+l3PI2bJe0VB1rTOszhOeTweJ0VlZYb0yAhmKHzoknkGQfJH6vLYh1F+fyGfexUZ8Hy19lQWQlmgUSfOfAF1NR/jzEmm6qt6b4ycVdtdNtrdaSn2d4lGJVfLS+aHfIsBpIZzEI9uqU1lmboetZGxrTOchqvK/Li2PZs6LAHNgq8x9NsZkXZtWU7sUD8hBLFnzhIkGm33if/D2+mGBbgEwUhQrwG6fWSmsk/oLZM5RnUa2Hmgbcr6Ky1UkCI+ZrZUlYSPRkvgvlVVWYbOXD9cOccUfRsbM9dtxh8dF47Hx54ow0S2fwzfP5IfqxNdMtVfa3FpoOlvtCATCrcCu/Nknf0R9MIMQJAqqikU3b+GW8Qy+dicNIeGjVcYFSTA=')
+	    .on('error', function(err) {
+	    	console.log(`爬虫此时出现请求异常： ${common.formatTime(new Date())}`);
+	    	console.log(err);
+	    })
 	    .end(function(err, res) {
 	    	// console.log(res.body);
+	    	// console.log(res);
 	      callback(null, res.body);
 	    });	
 	}
@@ -56,20 +87,24 @@ let start = function(offset, rank_id) {
 				recent_order_num: '', //月销量
 				order_lead_time: '' //平均配送时长
 			};
-			console.log(`\n第${offset+index}家店铺：`);
+
 			storeInfo.name = store.restaurant.name;
 			storeInfo.id = store.restaurant.id;
 			storeInfo.phone = store.restaurant.phone;
 			storeInfo.address = store.restaurant.address;
 			storeInfo.scheme = store.restaurant.scheme;
-			storeInfo.flavors = store.restaurant.flavors;
+			storeInfo.flavors = common.getFlavorStr(store.restaurant.flavors);
 			storeInfo.is_new = store.restaurant.is_new;
 			storeInfo.latitude = store.restaurant.latitude;
 			storeInfo.longitude = store.restaurant.longitude;
 			storeInfo.rating = store.restaurant.rating;
 			storeInfo.recent_order_num = store.restaurant.recent_order_num;
 			storeInfo.order_lead_time = store.restaurant.order_lead_time;	
-			console.log(storeInfo);
+
+			console.log(`\n第${(offset) + index}家店铺：`);
+			console.log(storeInfo); //即将要存储的对象
+
+			mongoHandler.saveStoreInfo(storeInfo);
 		});
 		callback(null, storeAllInfos);
 	}
@@ -78,12 +113,13 @@ let start = function(offset, rank_id) {
 		has_next = result.has_next;
 		offset = offset + 8;
 		rank_id = result.meta.rank_id;
-		url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
+		url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
 		index = index + 1;
-		if(has_next && index < 1) {
+		if(has_next && index < COUNT) {
 			start(offset, rank_id);
 		} else {
-			console.log(`\n已经停止于： ${new Date()}, 共执行了${index}个循环！\n`)
+			endDate = new Date();
+			console.log('爬取' + index * 8 + '条商家数据，' + '共耗时：'+ (endDate - startDate) +'ms' +' --> '+ (Math.round((endDate - startDate)/1000/60*100)/100) +'min');
 		}
 	});
 }
