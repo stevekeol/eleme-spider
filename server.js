@@ -1,127 +1,203 @@
-// const http = require("http");
-// const url = require("url");
-// const cheerio = require("cheerio"); //Node.js的抓取页面模块
-// const async = require("async");
-// const eventproxy = require('eventproxy'); //解决回调嵌套，让串行等待变成并行等待
-
-// const EVENTPROXY = new eventproxy();
-
-// const test = 'https://h5.ele.me/restapi/member/v2/users/223030102/location?longitude=120.064087&latitude=30.282619';
-
-// const xhrUrl_init = 'https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=0&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=&terminal=h5';
-
-// const test_0 = 'https://www.itjuzi.com/login';
-
-// let xhrUrl = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
-
-
-
-
+const http = require("http");
+const cluster = require('cluster');
 const superagent = require("superagent"); //客户端请求代理模块
 const async = require("async");
-const common = require('./utils/common.js');
+// const nodeExcel = require('excel-export');
 
 const mongoose = require('mongoose');
 global.mongoose = require('mongoose');
-
-const mongoHandler = require('./mongodb/mongoHandler.js');
-
+global.db = mongoose.connection;
+db.on('open', function(cb){ console.log(`[${common.formatTime(new Date())}]爬虫已准备就绪...`)});
 mongoose.connect("mongodb://127.0.0.1:‌​27017/eleme-spider", {useNewUrlParser:true});
 
-global.db = mongoose.connection;
-db.on('open', function(cb){
-	console.log('数据库成功连接');
-});
+const mongoHandler = require('./mongodb/mongoHandler.js');
+const common = require('./utils/common.js');
+const config = require('./utils/config.js');
 
-const	startDate = new Date();	//开始时间
-let	endDate = false;	//结束时间
 
-let	COUNT = 5; //人为控制爬取次数
+let isSpidering = false;
 
-//代理请求的中心位置
-let location = {
-	latitude: 30.681090,
-	longitude: 104.101420
+function onRequest(req, res) {
+    res.writeHead(200, {'Content-Type': 'text/html;charset=utf-8', 'Access-Control-Allow-origin': req.headers.origin});
+    const url = req.url;
+    const route = common.getQueryStringRoute(url);
+    const args = common.getQueryStringArgs(url);
+    // console.log(args);
+
+    if( route == 'getSpiderSummaryData' ) {
+        let getSpiderInfo = function(callback) {
+            mongoHandler.getSpiderInfo(callback);
+        } 
+        let getCitySpiderInfo = function(callback) {
+            mongoHandler.getCitySpiderInfo(callback);
+        }
+        async.parallel([getSpiderInfo, getCitySpiderInfo], function(err, results){
+            let result = {
+                totalStoresCount: results[0][0].totalStoresCount,
+                spideredCitys: results[0][0].spideredCitys,
+                currentCity: results[0][0].currentCity,
+                currentState: results[0][0].currentState,
+                items: results[1]          
+            }
+            res.end(JSON.stringify(result));
+        });
+    } else if ( route == 'geCitySpiderInfo') {
+        let getCitySpiderInfo = function(callback) {
+            mongoHandler.getCitySpiderInfo(callback);
+        }
+        async.parallel([getCitySpiderInfo], function(err, results){
+            let result = {
+                items: results[0]
+            }
+            res.end(JSON.stringify(result));
+        }); 
+    } else if ( route == 'exportDataToExcel' ) {
+        var getStoreInfo = function(callback) {
+            mongoHandler.getStoreInfo(args, callback);
+        }
+        async.waterfall([getStoreInfo], function(err, result) {
+            let resultReturn = {
+                resteraunts: result
+            }
+            res.end(JSON.stringify(resultReturn));
+        });
+    } else if ( route == 'startSpiderTask' ) {
+        if(!isSpidering) {
+            isSpidering = true; //开始爬取的标志
+            const   startDate = new Date(); //开始时间
+            let endDate = false;    //结束时间
+            let COUNT = config.limit; //人为控制爬取次数
+
+            //代理请求的中心位置
+            let location = {
+                latitude: common.detailLocation(args.latitude) || 30.681090,
+                longitude: common.detailLocation(args.longitude) || 104.101420,
+                province: args.province || '四川',
+                city: args.city || '成都'
+            }
+
+            let offset = 0;
+            let rank_id = '';
+            let has_next = true;
+            let index = 0;
+            let url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
+
+            let startSpider = function(offset, rank_id) {
+                let updateSpiderInfoBeforeSpider = function(callback) {
+                    mongoHandler.updateSpiderInfoBeforeSpider(location, callback);
+                }
+                let getStoresList = function(updatedStoreInfo, callback) {
+                    superagent
+                    .get(url)
+                    .set('cookie', config.cookie_storeList)
+                    .set('referer', 'https://h5.ele.me/')
+                    .set('user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1')
+                    .set('x-uab', config.x_uab_storeList)
+                    .on('error', function(err) {
+                        console.log(`爬虫此时出现请求异常： ${common.formatTime(new Date())}`);
+                        console.log(err);
+                    })
+                    .end(function(err, res) {
+                        // console.log(res.body.items[0]);
+                      callback(null, res.body);
+                    }); 
+                }
+
+                let getStoreItemInfo = function(storeAllInfos, callback) {
+                    // console.log(storeAllInfos.items[0]);
+                    let storeList = [...storeAllInfos.items];
+                    storeList.forEach(function(store, index, arr) {
+                        let storeInfo = {
+                            name: store.restaurant.name, //商家名称
+                            id: store.restaurant.id, //商家id
+                            phone: '', //商家电话
+                            address: '', //商家地址
+                            scheme: store.restaurant.scheme, //商家主页
+                            flavors: common.getFlavorStr(store.restaurant.flavors), //品类
+                            is_new: store.restaurant.is_new, //是否新商家
+                            latitude: store.restaurant.latitude, //商家纬度
+                            longitude: store.restaurant.longitude, //商家经度
+                            rating: store.restaurant.rating, //商家评分
+                            recent_order_num: store.restaurant.recent_order_num, //月销量
+                            order_lead_time: store.restaurant.order_lead_time, //平均配送时长
+                            province: location.province, // 所在省份
+                            city: location.city // 所在城市
+                        };
+
+                        common.sleep(parseInt(1000)); //每秒请求一个商家数据
+
+                        let urlGetPhoneAddress = `https://h5.ele.me/pizza/shopping/restaurants/${store.restaurant.id}/batch_shop?user_id=${config.user_id}&code=0.${store.restaurant.authentic_id}&extras=%5B%22activities%22%2C%22albums%22%2C%22license%22%2C%22identification%22%2C%22qualification%22%5D&terminal=h5`;
+                        let getStorePhoneAddressInfo = function(callback) {
+                            superagent
+                            .get(urlGetPhoneAddress)
+                            .set('cookie', config.cookie_storeInfo)
+                            .set('referer', 'https://h5.ele.me/shop/')
+                            .set('user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1')
+                            .set('x-uab', config.x_uab_storeInfo)
+                            .on('error', function(err) {
+                                console.log(`爬虫此时出现请求异常： ${common.formatTime(new Date())}`);
+                                console.log(err);
+                            })
+                            .end(function(err, res) {
+                                storeInfo.phone = res.body.rst.phone;
+                                storeInfo.address = res.body.rst.address;
+                                console.log(storeInfo); //即将要存储的对象
+                                mongoHandler.saveStoreInfo(storeInfo);
+                                callback(null, res.body.rst);
+                            }); 
+                        }
+
+                        async.waterfall([getStorePhoneAddressInfo], function(err, result) {
+                            //
+                        })
+                    });
+                    callback(null, storeAllInfos);
+                }
+
+                async.waterfall([updateSpiderInfoBeforeSpider, getStoresList, getStoreItemInfo], function(err, result) {
+                    // console.log(result);
+                    has_next = result.has_next;
+                    offset = offset + 8;
+                    rank_id = result.meta.rank_id;
+                    url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
+                    index = index + 1;
+                    if(has_next && index < COUNT) {
+                        common.sleep(parseInt(Math.random() * 1000));
+                        startSpider(offset, rank_id);
+                    } else {
+                        endDate = new Date();
+                        console.log('爬取' + index * 8 + '条商家数据，' + '共耗时：'+ (endDate - startDate) +'ms' +' --> '+ (Math.round((endDate - startDate)/1000/60*100)/100) +'min');
+                        isSpidering = false; //停止爬取的标识
+                        let updateSpiderInfoAfterSpider = function(callback) {
+                            let optionsAfterSpider = {
+                                addCount: index * 8,
+                            };
+                            mongoHandler.updateSpiderInfoAfterSpider(optionsAfterSpider, callback);
+                        }
+
+                        let updateCitySpiderInfoAfterSpider = function(updatedSpiderInfo, callback) {
+                            let optionsAfterSpider = {
+                                province: location.province,
+                                city: location.city,
+                                addCount: index * 8,
+                                state: '采集完成'
+                            };                            
+                            mongoHandler.updateCitySpiderInfoAfterSpider(optionsAfterSpider, callback);
+                        }
+
+                        async.waterfall([updateSpiderInfoAfterSpider, updateCitySpiderInfoAfterSpider], function(err, result) {
+                            // console.log(result);
+                            //给前端返回标记
+                        })
+                    }
+                });
+            }
+            startSpider(offset, rank_id);
+        } else {
+            // console.log('isSpidering: ' + isSpidering);
+            // console.log('其余请求/正在爬取中...');
+        }
+    }
 }
 
-let	offset = 0;
-let	rank_id = '';
-let	has_next = true;
-let	index = 0;
-// let	url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=30.282619&longitude=120.064087&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
-let	url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
-
-let start = function(offset, rank_id) {
-	let getStoreAllInfo = function(callback) {
-		superagent
-	    .get(url)
-	    .set('cookie', 'ubt_ssid=letbe83ed2dgw1ubh26xj4aoltlzhxx4_2019-05-22; _utrace=10da00394d52c6cf5dda8e0db2637e1d_2019-05-22; perf_ssid=p133tnt71er6h4bq71ylxhk12w6yqjsd_2019-05-22; cna=DUtqFSf+OyYCATy/M2IUrsNr; _bl_uid=91jU5v3OzeF86mowj7IR3vay6gFv; track_id=1558530274|515fc23c0beb6f1e06927ec367dfdb2e67521443236a8e7ef5|2b3c075a11ca151673d2757abf23dbcd; UTUSER=223030102; tzyy=cc1c26b6992fbc80ad70dc9c7e43c4ac; USERID=223030102; SID=utcIBo9hys04tpgF619JEW1Ht8YI1Ce6UMrg; ZDS=1.0|1558688062|k2Cw5hrBoSF5h1bzz5IGf2ClbaFSKsfgbUtW4GR/qA3qurTczV5LN9iPfDLRb6Rl; isg=BKGhjU9wWZcbjPVhbghCXgAosG2xRB_HiD2PXAN2lagHask8TJ7hElOsyNjJoq14')
-	    .set('referer', 'https://h5.ele.me/')
-	    .set('user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1')
-	    .set('x-uab', '118#ZVWZz2sMZu/oXZCfBHRIZYquZYT4zHWzagC2Voq4mMXHoUZTyHRVPgZuusqhzeWZZZZZXoqVzeAuZZZh0HWWGcb/ZzqTqhZzZgeCc5qVzHZzZeZTVHRVZZZuZwqhzeWzZZZuXTbVzHZzZeZhTgKfgH2Z5Nh6DwmYtHFUpoq4cAIJ+llc/guWQsu2Us41manDSp8JzBnss3ybyCbBub1Lz2wqTA5ZvtM7AY5iQ1uTugZCmrDtKHZzhCAYu+t5RgZTlJTRSmiVZFVxzWaEYrxGqLmRx41C2dYob1PLoF1IV0B47DhVSv8bVcY65NhWeAWBgeo4Gf2fFCcgZrIpJ9EG/tjt7G5jpZwC5GQwIYFOfH0NrLhg+DML4+mFz8vpwAAzIDt+l3PI2bJe0VB1rTOszhOeTweJ0VlZYb0yAhmKHzoknkGQfJH6vLYh1F+fyGfexUZ8Hy19lQWQlmgUSfOfAF1NR/jzEmm6qt6b4ycVdtdNtrdaSn2d4lGJVfLS+aHfIsBpIZzEI9uqU1lmboetZGxrTOchqvK/Li2PZs6LAHNgq8x9NsZkXZtWU7sUD8hBLFnzhIkGm33if/D2+mGBbgEwUhQrwG6fWSmsk/oLZM5RnUa2Hmgbcr6Ky1UkCI+ZrZUlYSPRkvgvlVVWYbOXD9cOccUfRsbM9dtxh8dF47Hx54ow0S2fwzfP5IfqxNdMtVfa3FpoOlvtCATCrcCu/Nknf0R9MIMQJAqqikU3b+GW8Qy+dicNIeGjVcYFSTA=')
-	    .on('error', function(err) {
-	    	console.log(`爬虫此时出现请求异常： ${common.formatTime(new Date())}`);
-	    	console.log(err);
-	    })
-	    .end(function(err, res) {
-	    	// console.log(res.body);
-	    	// console.log(res);
-	      callback(null, res.body);
-	    });	
-	}
-
-	let getStoreCriticalInfo = function(storeAllInfos, callback) {
-		let storeList = [...storeAllInfos.items];
-		storeList.forEach(function(store, index, arr) {
-			let storeInfo = {
-				name: '', //商家名称
-				id: '', //商家id
-				phone: '', //商家电话
-				address: '', //商家地址
-				scheme: '', //商家主页
-				flavors: [], //品类
-				is_new: false, //是否新商家
-				latitude: '', //商家纬度
-				longitude: '', //商家经度
-				rating: '', //商家评分
-				recent_order_num: '', //月销量
-				order_lead_time: '' //平均配送时长
-			};
-
-			storeInfo.name = store.restaurant.name;
-			storeInfo.id = store.restaurant.id;
-			storeInfo.phone = store.restaurant.phone;
-			storeInfo.address = store.restaurant.address;
-			storeInfo.scheme = store.restaurant.scheme;
-			storeInfo.flavors = common.getFlavorStr(store.restaurant.flavors);
-			storeInfo.is_new = store.restaurant.is_new;
-			storeInfo.latitude = store.restaurant.latitude;
-			storeInfo.longitude = store.restaurant.longitude;
-			storeInfo.rating = store.restaurant.rating;
-			storeInfo.recent_order_num = store.restaurant.recent_order_num;
-			storeInfo.order_lead_time = store.restaurant.order_lead_time;	
-
-			console.log(`\n第${(offset) + index}家店铺：`);
-			console.log(storeInfo); //即将要存储的对象
-
-			mongoHandler.saveStoreInfo(storeInfo);
-		});
-		callback(null, storeAllInfos);
-	}
-
-	async.waterfall([getStoreAllInfo, getStoreCriticalInfo], function(err, result) {
-		has_next = result.has_next;
-		offset = offset + 8;
-		rank_id = result.meta.rank_id;
-		url = `https://h5.ele.me/restapi/shopping/v3/restaurants?latitude=${location.latitude}&longitude=${location.longitude}&offset=${offset}&limit=8&extras[]=activities&extras[]=tags&extra_filters=home&rank_id=${rank_id}&terminal=h5`;
-		index = index + 1;
-		if(has_next && index < COUNT) {
-			start(offset, rank_id);
-		} else {
-			endDate = new Date();
-			console.log('爬取' + index * 8 + '条商家数据，' + '共耗时：'+ (endDate - startDate) +'ms' +' --> '+ (Math.round((endDate - startDate)/1000/60*100)/100) +'min');
-		}
-	});
-}
-
-start(offset, rank_id);
+http.createServer(onRequest).listen(3000);
